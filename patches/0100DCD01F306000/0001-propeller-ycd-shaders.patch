@@ -1,0 +1,66 @@
+diff --git a/dm/gfx/tools/shader_split.py b/dm/gfx/tools/shader_split.py
+index b7fdb433..09f1afa7 100644
+--- a/dm/gfx/tools/shader_split.py
++++ b/dm/gfx/tools/shader_split.py
+@@ -404,6 +404,40 @@ def snowdrop_shaders(d, label, wrapped=True):
+         out += snowdrop_shaders(raw, f'{label}#SDFZSTD@{h:#x}', wrapped=False)
+     return out
+ 
++def ycd_shaders(path, label):
++    """Propeller's YCD shaders.pak.yc: each .vert.bin/.frag.bin is an 8-byte
++    prefix, a 0x880-byte NVN control section, then its code area. The table
++    stores signed relative pointers in the high 32 bits of its 64-bit fields.
++    Only read the shader pack; other YCD packs are game assets, not shaders."""
++    out = []
++    with open(path, 'rb') as f:
++        f.seek(0, 2); end = f.tell()
++        f.seek(8); content = struct.unpack('<Q', f.read(8))[0]
++        if not 128 <= content <= end - 16: red(f'{label}: bad YCD content offset')
++        f.seek(content); desc = f.read(16)
++        count = struct.unpack_from('<q', desc)[0] >> 34
++        table = content + 8 + (struct.unpack_from('<q', desc, 8)[0] >> 32)
++        if not 0 < count < 100000 or not 0 <= table <= end - count * 32: red(f'{label}: bad YCD file table')
++        for i in range(count):
++            pos = table + i * 32; f.seek(pos); e = f.read(32)
++            n = struct.unpack_from('<q', e)[0] >> 32
++            name_at = pos + 8 + (struct.unpack_from('<q', e, 8)[0] >> 32)
++            size = struct.unpack_from('<I', e, 16)[0]
++            data_at = pos + 24 + (struct.unpack_from('<q', e, 24)[0] >> 32)
++            if not 0 < n < 4096 or not 0 <= name_at <= end - n: red(f'{label}: bad YCD name at entry {i}')
++            f.seek(name_at); name = f.read(n).decode('utf-8')
++            st = 'vs' if name.endswith('.vert.bin') else 'ps' if name.endswith('.frag.bin') else None
++            if not st: continue
++            if size < 8 + 0x880 + 0x30 or not 0 <= data_at <= end - size: red(f'{label}/{name}: bad shader data range')
++            f.seek(data_at); data = f.read(size)
++            ctl, code = data[8:8 + 0x880], data[8 + 0x880:]
++            why = check(label, st, ctl, code)
++            if why: red(f'{label}/{name}: {why}')
++            actual = glslc_stage(ctl, code)
++            if actual != st: red(f'{label}/{name}: stage {actual}, expected {st}')
++            out.append((f'{label}/{name}', st, ctl, code))
++    return out
++
+ NEEDLE = b'HNSHV002'
+ def needle_shaders(d, label):
+     """Needle shader containers, embedded in main and in GFD's GSC files inside CRI CPKs (Persona 5 Royal). HNSHV002 +8 is the container's whole length, big-endian. Variant and reflection
+@@ -2154,7 +2188,9 @@ def unzs(path):
+     frames that name one with that dictionary from ZDICTS"""
+     d = open(path, 'rb').read()
+     did = zs_dict_id(d)
+-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
++    if not did:
++        if not shutil.which('zstd'): return zstd_mod().decompress(d)   # Windows has no zstd command: the same frames through Python's zstd
++        return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
+     return unzs_dict(d, did, path)
+ 
+ def frame_size(f):
+@@ -2524,6 +2560,9 @@ def scan_file_in(args):
+     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
+     with open(path, 'rb') as f: head = f.read(16)
+     found = []; trees = {}
++    if rel.endswith('shaders.pak.yc') and head[:4] == b'YCD\0':
++        found = ycd_shaders(path, '/' + rel)
++        return rel, uniq_keys(found), var_pairs(found), trees
+     if len(args) > 2 and args[2][0] == b'ARH1':
+         arh_shaders(path, rel, args[2][1], found)
+         return rel, uniq_keys(found), var_pairs(found), trees

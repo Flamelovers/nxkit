@@ -1,0 +1,40 @@
+diff --git a/dm/tools/romfs.py b/dm/tools/romfs.py
+index ae1dbfb3..358d3472 100644
+--- a/dm/tools/romfs.py
++++ b/dm/tools/romfs.py
+@@ -92,7 +92,7 @@ def is_image(path):
+ 
+ 
+ def _resolve(path):
+-    p = _os.path.abspath(_os.fsdecode(path))
++    p = _os.path.abspath(_os.fsdecode(path)).replace('\\', '/')   # Windows separators: image paths are split on '/'
+     parts = p.split('/')
+     for i, part in enumerate(parts):
+         if not part.endswith('.img'): continue
+@@ -116,6 +116,7 @@ _fd_ranges = {}
+ class _File(io.RawIOBase):
+     def __init__(self, image, k):
+         self.fd = _os.open(image.path, _os.O_RDONLY)
++        self._bf = None if hasattr(_os, 'pread') else builtins.open(image.path, 'rb')   # Windows: buffered reads survive a volume's short raw reads
+         self.start, self.length = image.entry(k)[:2]
+         self.pos = 0
+         _fd_ranges[self.fd] = (self.start, self.length)
+@@ -129,12 +130,17 @@ class _File(io.RawIOBase):
+         self.pos = pos; return pos
+     def readinto(self, buffer):
+         size = min(len(buffer), max(0, self.length - self.pos))
+-        data = _os.pread(self.fd, size, self.start + self.pos)
++        if self._bf is not None:
++            self._bf.seek(self.start + self.pos)
++            data = self._bf.read(size)
++        else:
++            data = _os.pread(self.fd, size, self.start + self.pos)
+         buffer[:len(data)] = data; self.pos += len(data)
+         return len(data)
+     def close(self):
+         if not self.closed:
+             _fd_ranges.pop(self.fd, None); _os.close(self.fd)
++            if self._bf is not None: self._bf.close()
+         super().close()
+ 
+ 

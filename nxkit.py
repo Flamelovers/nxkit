@@ -213,7 +213,7 @@ def prepare(repo, commit, nsp_dir, keys, kit_zip, package=None, app_name=None, l
     B.PROG.stage('build nx_extract')
     nx = B.build_nx_extract(repo, work, logs, env)
     B.PROG.end()
-    dirs = {v: B.extract(nx, keys, ex, v, *picks[v], None, logs, g) for v in versions}
+    dirs = {v: B.extract(nx, keys, ex, v, *picks[v], None, logs, g, app) for v in versions}   # the upstream added app (the --app argument)
     bad = [f'{v}: {x}' for v in versions for x in B.build_mismatch(dirs[v], v, g)] if provisional or not derived else []
     if bad and provisional: raise KitError(f'not the builds provisional game profile {g.id} registers: {"; ".join(bad)}')
     if bad:
@@ -229,7 +229,7 @@ def prepare(repo, commit, nsp_dir, keys, kit_zip, package=None, app_name=None, l
         B.say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
     sv = versions if derived else need
     game = dirs[pkg_ver]
-    src = pg.build_sources(game / 'ExeFS', game / 'RomFS', g.words('modules'))
+    src = pg.build_sources(game / 'ExeFS', B.rfs.source(game), g.words('modules'))   # RomFS folder (older checkouts) or RomFS.img
     gfx = src['graphics'][0]
     on = {'glslc_capture': gfx == 'nvn', 'vk_capture': gfx == 'vulkan', 'gl_capture': gfx == 'gl', 'ue_decode': gfx == 'nvn', 'oodle_packs': gfx == 'nvn', 'ue_legacy': gfx == 'nvn'}
     mac = [why for k, why in NEEDS_MAC.items() if on[k] and src[k][0]]
@@ -252,7 +252,7 @@ def prepare(repo, commit, nsp_dir, keys, kit_zip, package=None, app_name=None, l
         B.provisional_prep(py, repo, env, logs, g)
         g = B.refine_after_rewrite(g, game, patched)
     if gfx == 'nvn':
-        B.split_shaders(py, repo, [dirs[v] / 'RomFS' for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], work / 'shader/pkg', env, logs, g, bool(derived), None)
+        B.split_shaders(py, repo, [B.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], work / 'shader/pkg', env, logs, g, bool(derived), None)
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)
 
     # The kit: what the Mac steps read, without the game files
@@ -264,14 +264,14 @@ def prepare(repo, commit, nsp_dir, keys, kit_zip, package=None, app_name=None, l
     for n in ('control.nacp',):
         if (game / n).exists(): shutil.copyfile(game / n, kit / 'game' / n)
     if icon: shutil.copyfile(icon, kit / 'game/icon.jpg')
-    romfs = game / 'RomFS'
+    romfs = B.rfs.source(game)
     keep = []
     if gfx == 'vulkan':
         import vk_shaders
         keep += [Path(p) for p in vk_shaders.spirv_files(str(romfs))]   # what vk_shaders.py translates
     marker = romfs / g.get('romfs_marker')   # build_ipa.sh only checks that it exists; a stub keeps the kit under GitHub's 2 GB asset limit (DARK SOULS' marker is a 3 GB archive), and the merge takes the real RomFS from the PC
     if marker not in keep:
-        d = kit / 'game/RomFS' / marker.relative_to(romfs); d.parent.mkdir(parents=True, exist_ok=True); d.write_text('nxkit stub; the real file is merged on the PC\n')
+        d = kit / 'game/RomFS' / Path(g.get('romfs_marker')); d.parent.mkdir(parents=True, exist_ok=True); d.write_text('nxkit stub; the real file is merged on the PC\n')
     for p in keep:
         d = kit / 'game/RomFS' / p.relative_to(romfs); d.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(p, d)
     if gfx == 'nvn': shutil.copytree(work / 'shader/pkg', kit / 'shader/pkg')
@@ -418,13 +418,29 @@ def cloud_ipa(cfg, home, kit_enc, tag, commit, finish):
     the kit's release and the run's artifacts are deleted"""
     slug = cfg['repo']
     try:
-        gh('release', 'create', tag, kit_enc, '--repo', slug, '--prerelease', '--title', tag, '--notes', 'Encrypted nxkit build kit; the build deletes it.')
-        gh('workflow', 'run', 'build-ipa.yml', '--repo', slug, '-f', f'kit_tag={tag}', '-f', f'nxnative_ref={commit}')
+        for attempt in range(5):
+            try:
+                gh('release', 'create', tag, kit_enc, '--repo', slug, '--prerelease', '--title', tag, '--notes', 'Encrypted nxkit build kit; the build deletes it.')
+                break
+            except KitError:
+                if attempt == 4: raise
+                time.sleep(5)
+        for attempt in range(5):
+            try:
+                gh('workflow', 'run', 'build-ipa.yml', '--repo', slug, '-f', f'kit_tag={tag}', '-f', f'nxnative_ref={commit}')
+                break
+            except KitError:
+                if attempt == 4: raise
+                time.sleep(5)
         say('cloud build started; waiting for GitHub to list it')
         run_id = None
         for _ in range(60):
             time.sleep(5)
-            runs = json.loads(gh('run', 'list', '--repo', slug, '--workflow', 'build-ipa.yml', '--limit', '20', '--json', 'databaseId,displayTitle', capture=True))
+            try:
+                runs = json.loads(gh('run', 'list', '--repo', slug, '--workflow', 'build-ipa.yml', '--limit', '20', '--json', 'databaseId,displayTitle', capture=True))
+            except KitError as e:
+                say(f'GitHub run lookup failed; retrying: {e}')
+                continue
             run_id = next((r['databaseId'] for r in runs if tag in r['displayTitle']), None)
             if run_id: break
         if not run_id: raise KitError('the cloud build did not start (see the Actions tab)')
@@ -433,7 +449,14 @@ def cloud_ipa(cfg, home, kit_enc, tag, commit, finish):
             fetch_logs(slug, run_id, home / 'logs' / tag, cfg['password'])
             raise KitError(f'the cloud build failed: https://github.com/{slug}/actions/runs/{run_id}')
         dl = home / 'downloads' / tag; B_rm(dl)
-        gh('run', 'download', run_id, '--repo', slug, '--name', 'ipa', '--dir', dl)
+        for attempt in range(5):
+            try:
+                gh('run', 'download', run_id, '--repo', slug, '--name', 'ipa', '--dir', dl)
+                break
+            except KitError:
+                if attempt == 4: raise
+                B_rm(dl)
+                time.sleep(5)
         slim = dl / 'slim.ipa'
         decrypt(dl / 'slim.ipa.nxk', slim, cfg['password'])
         finish(slim)
