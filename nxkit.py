@@ -319,6 +319,7 @@ def build(repo, kit_dir, out_ipa):
     env = dict(os.environ, PATH=os.pathsep.join(B.TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin')]))
     env.setdefault('USER', getpass.getuser()); env.setdefault('J', str(os.cpu_count() or 8))
     env.update(DM_GAME=meta['game'], DM_ROOT=str(work), WORK=str(work / 'tmp'))
+    env.setdefault('DM_ALLOW_OTHER_METAL', '1')   # the macOS runner's Xcode trails the Metal compiler the upstream pins
     if meta['derived']:
         os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = str(kit / 'profile')
         os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
