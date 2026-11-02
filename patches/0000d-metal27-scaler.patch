@@ -1,8 +1,21 @@
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 0b9660e5..d76387ec 100644
+index 0b9660e5..bbab000c 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
-@@ -10844,11 +10844,12 @@ static void dlss_eval(const p_dlss *c) {
+@@ -10815,6 +10815,12 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
+               (unsigned long)col.pixelFormat, (unsigned long)dep.pixelFormat, (unsigned long)mot.pixelFormat, (unsigned long)out.pixelFormat);
+     return e->sc ? e : NULL;
+ }
++@protocol mtl27_scaler_offsets   // MetalFX's rectangle-corner setters, new in the Xcode 27 SDK: declared so an older SDK still compiles
++- (void)setColorContentOffsetX:(NSUInteger)v; - (void)setColorContentOffsetY:(NSUInteger)v;
++- (void)setDepthContentOffsetX:(NSUInteger)v; - (void)setDepthContentOffsetY:(NSUInteger)v;
++- (void)setMotionContentOffsetX:(NSUInteger)v; - (void)setMotionContentOffsetY:(NSUInteger)v;
++- (void)setOutputOffsetX:(NSUInteger)v; - (void)setOutputOffsetY:(NSUInteger)v;
++@end
+ static void dlss_eval(const p_dlss *c) {
+     rp_flush();   // the passes before it land first: they write its inputs
+     id<MTLTexture> col = c->tex[DLSS_COLOR] ? tex_mtl(c->tex[DLSS_COLOR]) : nil, dep = c->tex[DLSS_DEPTH] ? tex_mtl(c->tex[DLSS_DEPTH]) : nil, mot = c->tex[DLSS_MOTION] ? tex_mtl(c->tex[DLSS_MOTION]) : nil,
+@@ -10844,11 +10850,12 @@ static void dlss_eval(const p_dlss *c) {
      [ce endEncoding];
      sc.colorTexture = col; sc.depthTexture = dep; sc.motionTexture = mot; sc.outputTexture = out; sc.exposureTexture = expo;
      sc.inputContentWidth = iw; sc.inputContentHeight = ih;
@@ -11,7 +24,7 @@ index 0b9660e5..d76387ec 100644
 -        sc.depthContentOffsetX = (NSUInteger)c->base[DLSS_DEPTH][0]; sc.depthContentOffsetY = (NSUInteger)c->base[DLSS_DEPTH][1];
 -        sc.motionContentOffsetX = (NSUInteger)c->base[DLSS_MOTION][0]; sc.motionContentOffsetY = (NSUInteger)c->base[DLSS_MOTION][1];
 -        sc.outputOffsetX = (NSUInteger)c->base[DLSS_OUTPUT][0]; sc.outputOffsetY = (NSUInteger)c->base[DLSS_OUTPUT][1];
-+    id scid = sc;
++    id<mtl27_scaler_offsets> scid = (id<mtl27_scaler_offsets>)sc;
 +    if ([scid respondsToSelector:@selector(setColorContentOffsetX:)]) {   // the rectangles' corners: all at the origin on the game seen, so an older SDK loses nothing there
 +        [scid setColorContentOffsetX:(NSUInteger)c->base[DLSS_COLOR][0]]; [scid setColorContentOffsetY:(NSUInteger)c->base[DLSS_COLOR][1]];
 +        [scid setDepthContentOffsetX:(NSUInteger)c->base[DLSS_DEPTH][0]]; [scid setDepthContentOffsetY:(NSUInteger)c->base[DLSS_DEPTH][1]];
