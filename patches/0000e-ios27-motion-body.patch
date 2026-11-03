@@ -1,5 +1,5 @@
 diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
-index a079d7f2..5cdd54a1 100644
+index a079d7f2..1eade9b6 100644
 --- a/dm/ios/Sources/DmGamepad.m
 +++ b/dm/ios/Sources/DmGamepad.m
 @@ -92,7 +92,7 @@ static void phone_motion_start(UIView *body) {
@@ -7,7 +7,7 @@ index a079d7f2..5cdd54a1 100644
      LOG("front end: the phone's gyro drives the controller's six-axis sensor %s", mode < 0 ? "while no controller supplies fresh motion" : "always (DM_PHONE_MOTION=1)");
      g_motion.deviceMotionUpdateInterval = 1.0 / 100;
 -    if (@available(iOS 27.0, *)) { g_motion.deviceMotionBody = body; g_motion_body = YES; LOG("front end: the phone's motion comes in the pad view's frame (deviceMotionBody)"); }
-+    if (@available(iOS 27.0, *)) { [g_motion setValue:@(body) forKey:@"deviceMotionBody"]; g_motion_body = YES; LOG("front end: the phone's motion comes in the pad view's frame (deviceMotionBody)"); }   // KVC: the property is new in the iOS 27 SDK
++    if (@available(iOS 27.0, *)) { [g_motion setValue:body forKey:@"deviceMotionBody"]; g_motion_body = YES; LOG("front end: the phone's motion comes in the pad view's frame (deviceMotionBody)"); }   // KVC: the property is new in the iOS 27 SDK
      NSOperationQueue *q = [NSOperationQueue new]; q.maxConcurrentOperationCount = 1;
      [g_motion startDeviceMotionUpdatesToQueue:q withHandler:^(CMDeviceMotion *d, NSError *err) {
          (void)err; if (!d) return;
