@@ -2,6 +2,8 @@
 
 Status: IPA built and ZIP integrity checked for update v1.0.9. Gameplay has not been tested on an iPhone.
 
+An iPhone launch log subsequently showed that the bundled RomFS mounted successfully, but Godot failed to create its Vulkan context (`_initialize_devices`, `ERR_CANT_CREATE`) and the display server. The black screen is therefore a graphics bridge issue, not a missing-resource symptom.
+
 ## Package and build
 
 - Base v0 and update v589824; update `main` build ID `53e2366a73ef1a06f185c5d80c13d642`.
@@ -20,3 +22,7 @@ Status: IPA built and ZIP integrity checked for update v1.0.9. Gameplay has not 
 ## Next validation
 
 Install the IPA on a compatible iPhone and inspect `Documents/log.txt` after launch. Verify boot, graphics, input, audio and memory. Capture missing shader modules or unsupported Vulkan calls and extend the bridge before describing the game as playable.
+
+## Separate app and resources
+
+`python nxkit.py shell <slim-or-full.ipa> <build/nxkit.json> -o <shell.ipa>` removes bundled `romfs/`, `romfs.img`, and `aoc/` entries and adds a `romfs.id` that matches the extracted image. Transfer that image to the app's `Documents/romfs.img` once. Later app changes can use the same image as long as the game version is unchanged; generate only a new shell IPA. The app's bundle ID is `org.nxnative.010019c023004000`, and file sharing is enabled.

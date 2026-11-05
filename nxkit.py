@@ -6,11 +6,12 @@ The work is split three ways:
                   and put what the Mac needs in a small encrypted build kit; the game files (RomFS) stay on the PC
   cloud  build    on a GitHub macOS runner: the Metal shader libraries and the app (Xcode), packed as a "slim" IPA without the game files
   PC     merge    the slim IPA + the game files extracted on the PC → the finished IPA
+  PC     shell    keep the app and shaders in a small IPA; the RomFS image stays separate
 
 Commands (run on the PC unless noted):
   setup --repo <owner>/<name> [--home DIR]   one time: tools, the nxnative checkout and the kit password (also stored as the repository's KIT_PASSWORD secret)
   game <NSP folder> -k <prod.keys> [options] the whole build: prepare → upload the kit → run the workflow → download → merge
-  prepare / build / merge / encrypt / decrypt  the single steps (build runs on the Mac runner)
+  prepare / build / merge / shell / encrypt / decrypt  the single steps (build runs on the Mac runner)
 
 Everything that leaves the PC is encrypted with AES-256-GCM under the kit password, so a public repository's releases and artifacts show nothing readable.
 """
@@ -411,6 +412,39 @@ def merge(slim, romfs, aoc, store, out):
     say(f'merged in {time.time() - t0:.0f} s: {out} ({out.stat().st_size / 2 ** 30:.2f} GB)')
 
 
+def make_shell(ipa, info, out):
+    """Pack only the app and its compiled shaders, with the exact external RomFS image identity."""
+    ipa, out = Path(ipa).resolve(), Path(out).resolve()
+    romfs = Path(info['romfs']).resolve()
+    if not romfs.is_file(): raise KitError(f'RomFS image not found: {romfs}')
+    if ipa == out: raise KitError('shell output must differ from input IPA')
+    native = Path(load_config()['home']) / 'nxnative' / 'dm/tools/romfs_image.py'
+    if not native.is_file(): raise KitError(f'RomFS identity tool not found: {native}')
+    ident = run([sys.executable, native, '--identity', romfs, info['game'], info['app_version'], info['package']],
+                capture_output=True, text=True).stdout.strip() + '\n'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + '.partial')
+    with zipfile.ZipFile(ipa) as zin, zipfile.ZipFile(tmp, 'w', allowZip64=True) as zout:
+        names = set(zin.namelist())
+        if APP + 'Info.plist' not in names or APP + 'DmIOS' not in names:
+            raise KitError(f'not a DmIOS IPA: {ipa}')
+        for src in zin.infolist():
+            if src.filename.startswith((APP + 'romfs/', APP + 'aoc/')) or src.filename in (APP + 'romfs.img', APP + 'romfs.id'):
+                continue
+            dst = zipfile.ZipInfo(src.filename, date_time=src.date_time)
+            dst.create_system, dst.external_attr = src.create_system, src.external_attr
+            dst.compress_type, dst.compress_level = src.compress_type, 6
+            if src.is_dir(): zout.writestr(dst, b'')
+            else:
+                with zin.open(src) as reader, zout.open(dst, 'w', force_zip64=src.file_size >= 1 << 31) as writer:
+                    shutil.copyfileobj(reader, writer, 16 << 20)
+        dst = zipfile.ZipInfo(APP + 'romfs.id')
+        dst.create_system, dst.external_attr, dst.compress_type = 3, 0o100644 << 16, zipfile.ZIP_DEFLATED
+        zout.writestr(dst, ident.encode('ascii'))
+    tmp.replace(out)
+    say(f'shell IPA: {out} ({out.stat().st_size / 2 ** 20:.1f} MB); resource: {romfs}')
+
+
 def dos_time(p):
     t = time.localtime(max(p.stat().st_mtime, 315532800 + 86400))   # zip times start in 1980
     return t[:6]
@@ -632,6 +666,8 @@ def main(argv=None):
     s.add_argument('repo'); s.add_argument('kit_dir'); s.add_argument('-o', '--out', required=True)
     s = sub.add_parser('merge', help='PC step: slim IPA + game files → IPA')
     s.add_argument('slim'); s.add_argument('info', help='<id>_build/nxkit.json from prepare'); s.add_argument('-o', '--out')
+    s = sub.add_parser('shell', help='PC step: IPA + RomFS identity → small IPA for separate resource transfer')
+    s.add_argument('ipa'); s.add_argument('info', help='<id>_build/nxkit.json from prepare'); s.add_argument('-o', '--out', required=True)
     for c in ('encrypt', 'decrypt'):
         s = sub.add_parser(c, help=f'{c} a file with the kit password (KIT_PASSWORD environment, else nxkit.local.json)')
         s.add_argument('src'); s.add_argument('dst')
@@ -649,6 +685,8 @@ def main(argv=None):
         elif a.cmd == 'merge':
             info = json.loads(Path(a.info).read_text())
             merge(a.slim, info['romfs'], info['aoc'], info['zip_store'], a.out or info['ipa'])
+        elif a.cmd == 'shell':
+            make_shell(a.ipa, json.loads(Path(a.info).read_text()), a.out)
         else:
             pw = os.environ.get('KIT_PASSWORD') or load_config()['password']
             (encrypt if a.cmd == 'encrypt' else decrypt)(a.src, a.dst, pw)
