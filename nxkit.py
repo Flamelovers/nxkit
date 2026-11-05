@@ -327,6 +327,8 @@ def build(repo, kit_dir, out_ipa):
     env.update(DM_GAME=meta['game'], DM_ROOT=str(work), WORK=str(work / 'tmp'))
     if meta['game'] == '010019C023004000':
         env['DM_VK_NO_DUAL_SOURCE'] = '1'   # Godot's color(1) is a second render target, not a dual-source blend output
+        env['DM_VK_SPLIT_LIBS'] = '128'      # one library containing 3,292 shaders is killed by the Mac runner
+        env['DM_VK_IOS_ONLY'] = '1'          # the cloud build only packages the iPhone library
     env.setdefault('DM_ALLOW_OTHER_METAL', '1')   # the macOS runner's Xcode trails the Metal compiler the upstream pins
     if meta['derived']:
         os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = str(kit / 'profile')
