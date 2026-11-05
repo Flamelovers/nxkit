@@ -18,7 +18,7 @@ import argparse, getpass, json, os, re, secrets, shutil, struct, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-NXNATIVE_REF = '2db12f7efdf2acf50026ec10f515193d67f2a3b6'   # the nxnative commit patches/ are made for: main moves several times a day and can break them (--nxnative-ref main: the newest)
+NXNATIVE_REF = 'e5620b1a05a5b7374e0135d6312d3e90994eab81'   # the nxnative commit the Windows patches below are made for
 CONFIG = HERE / 'nxkit.local.json'     # home folder, repository and kit password (never committed: see .gitignore)
 APP = 'Payload/DmIOS.app/'             # the app folder inside the IPA (dm/ios/tools/build_ipa.sh)
 NEEDS_MAC = {   # what profile_guess.py shader_sources reports → why the build boots the game on a Mac
@@ -230,7 +230,7 @@ def prepare(repo, commit, nsp_dir, keys, kit_zip, package=None, app_name=None, l
     sv = versions if derived else need
     game = dirs[pkg_ver]
     src = pg.build_sources(game / 'ExeFS', B.rfs.source(game), g.words('modules'))   # RomFS folder (older checkouts) or RomFS.img
-    gfx = src['graphics'][0]
+    gfx = 'vulkan' if g.id == '010019C023004000' else src['graphics'][0]   # Godot resolves Vulkan functions by name, so main has no vk* imports
     on = {'glslc_capture': gfx == 'nvn', 'vk_capture': gfx == 'vulkan', 'gl_capture': gfx == 'gl', 'ue_decode': gfx == 'nvn', 'oodle_packs': gfx == 'nvn', 'ue_legacy': gfx == 'nvn'}
     mac = [why for k, why in NEEDS_MAC.items() if on[k] and src[k][0]]
     if mac: raise KitError(f'this game can\'t be built without a real Mac: {"; ".join(mac)}')
@@ -266,7 +266,7 @@ def prepare(repo, commit, nsp_dir, keys, kit_zip, package=None, app_name=None, l
     if icon: shutil.copyfile(icon, kit / 'game/icon.jpg')
     romfs = B.rfs.source(game)
     keep = []
-    if gfx == 'vulkan':
+    if gfx == 'vulkan' and g.id != '010019C023004000':
         import vk_shaders
         keep += [Path(p) for p in vk_shaders.spirv_files(str(romfs))]   # what vk_shaders.py translates
     marker = romfs / g.get('romfs_marker')   # build_ipa.sh only checks that it exists; a stub keeps the kit under GitHub's 2 GB asset limit (DARK SOULS' marker is a 3 GB archive), and the merge takes the real RomFS from the PC
@@ -274,6 +274,10 @@ def prepare(repo, commit, nsp_dir, keys, kit_zip, package=None, app_name=None, l
         d = kit / 'game/RomFS' / Path(g.get('romfs_marker')); d.parent.mkdir(parents=True, exist_ok=True); d.write_text('nxkit stub; the real file is merged on the PC\n')
     for p in keep:
         d = kit / 'game/RomFS' / p.relative_to(romfs); d.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(p, d)
+    if g.id == '010019C023004000':
+        cache = work / 'godot-smolv'
+        run([py, HERE / 'tools/godot_cache_extract.py', romfs, cache, '--nxnative', repo])
+        shutil.copytree(cache, kit / 'godot-smolv')
     if gfx == 'nvn': shutil.copytree(work / 'shader/pkg', kit / 'shader/pkg')
     meta = dict(nxnative_commit=commit, game=g.id, title=f'{app:016X}', package=pkg_ver, gfx=gfx, derived=bool(derived), app_name=app_name, bundle_id=bundle_id,
                 app_version=app_version or '', language=lang, show_fps=bool(show_fps), icon=bool(icon))
@@ -304,6 +308,8 @@ def patch_files(game=None):
 def apply_patches(repo, game=None):
     """The general patches and, with game, that game's own, applied on the PC (checkout, prepare, rebuild) and on the Mac (build) alike"""
     for p in patch_files(game):
+        if p.name == '0000d-metal27-scaler.patch' and b'dlss_eval' not in (Path(repo) / 'dm/gfx/nvn/nvn_mtl.m').read_bytes():
+            continue   # this nxnative build predates the MetalFX DLSS API used by this compatibility patch
         if subprocess.run(['git', '-C', repo, 'apply', '--reverse', '--check', p], capture_output=True).returncode == 0: continue   # already applied
         r = subprocess.run(['git', '-C', repo, 'apply', p], capture_output=True, text=True)
         if r.returncode: raise KitError(f'{p.relative_to(HERE / "patches").as_posix()} does not apply to this nxnative commit: {r.stderr.strip()[-300:]}')
@@ -331,6 +337,10 @@ def build(repo, kit_dir, out_ipa):
     sh = work / 'shader'
     try:
         if meta['gfx'] == 'vulkan':
+            if (kit / 'godot-smolv').is_dir():
+                decoder = work / 'godot-smolv-decoder'
+                run(['c++', '-std=c++17', '-O2', HERE / 'tools/godot-smolv/smolv.cpp', HERE / 'tools/godot-smolv/decode.cpp', '-o', decoder])
+                run([decoder, kit / 'godot-smolv', kit / 'game/RomFS/godot_spirv'])
             ios = B.build_vk_shaders(py, repo, [kit / 'game/RomFS'], sh, env, logs, g, reuse=False)
         else:
             shutil.copytree(kit / 'shader/pkg', sh / 'pkg')
@@ -355,7 +365,7 @@ def merge(slim, romfs, aoc, store, out):
     a zip_store suffix stored, everything else deflated at level 6"""
     store = tuple(s.lower() for s in (store or '').split(':') if s)
     out = Path(out); tmp = out.with_name(out.name + '.partial')
-    total = sum(p.stat().st_size for root in (romfs, aoc) if root for p in Path(root).rglob('*') if p.is_file())
+    total = sum(Path(root).stat().st_size if Path(root).is_file() else sum(p.stat().st_size for p in Path(root).rglob('*') if p.is_file()) for root in (romfs, aoc) if root)
     done, t0, shown = 0, time.time(), 0
 
     def add_tree(z, root, arc):
@@ -385,7 +395,13 @@ def merge(slim, romfs, aoc, store, out):
             zi.create_system, zi.external_attr, zi.compress_type, zi.compress_level = info.create_system, info.external_attr, info.compress_type, 6
             if info.is_dir(): z.writestr(zi, b''); continue
             with zin.open(info) as f, z.open(zi, 'w', force_zip64=info.file_size >= 1 << 31) as o: shutil.copyfileobj(f, o, 16 << 20)
-        add_tree(z, romfs, APP + 'romfs/')
+        if Path(romfs).is_file():
+            p = Path(romfs)
+            zi = zipfile.ZipInfo(APP + 'romfs.img', date_time=dos_time(p))
+            zi.create_system, zi.external_attr, zi.compress_type = 3, 0o100644 << 16, zipfile.ZIP_STORED
+            with open(p, 'rb') as f, z.open(zi, 'w', force_zip64=True) as o: shutil.copyfileobj(f, o, 16 << 20)
+        else:
+            add_tree(z, romfs, APP + 'romfs/')
         if aoc and Path(aoc).is_dir(): add_tree(z, aoc, APP + 'aoc/')
     tmp.replace(out)
     say(f'merged in {time.time() - t0:.0f} s: {out} ({out.stat().st_size / 2 ** 30:.2f} GB)')
@@ -428,7 +444,7 @@ def cloud_ipa(cfg, home, kit_enc, tag, commit, finish):
                 time.sleep(5)
         for attempt in range(5):
             try:
-                gh('workflow', 'run', 'build-ipa.yml', '--repo', slug, '-f', f'kit_tag={tag}', '-f', f'nxnative_ref={commit}')
+                gh('workflow', 'run', 'build-ipa.yml', '--repo', slug, '--ref', cfg.get('workflow_ref', 'main'), '-f', f'kit_tag={tag}', '-f', f'nxnative_ref={commit}')
                 break
             except KitError:
                 if attempt == 4: raise
