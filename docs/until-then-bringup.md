@@ -4,6 +4,8 @@ Status: IPA built and ZIP integrity checked for update v1.0.9. Gameplay has not 
 
 An iPhone launch log subsequently showed that the bundled RomFS mounted successfully, but Godot failed to create its Vulkan context (`_initialize_devices`, `ERR_CANT_CREATE`) and the display server. The black screen is therefore a graphics bridge issue, not a missing-resource symptom.
 
+The subsequent separate-resource log confirmed that `Documents/romfs.img` mounted, and `DM_VK_LOG=1` produced no bridge calls. `ro::LookupSymbol` resolved `vkGetInstanceProcAddr` and `vkGetDeviceProcAddr` to the loaded Nintendo Vulkan `subsdk1` module. Game patch `0003-ro-vulkan-bridge.patch` routes those two lookups to nxnative's host Vulkan bridge. [Cloud run 42051226101](https://github.com/Flamelovers/nxkit/actions/runs/42051226101) built a replacement shell; device testing is still required to learn whether later Vulkan calls also need work.
+
 ## Package and build
 
 - Base v0 and update v589824; update `main` build ID `53e2366a73ef1a06f185c5d80c13d642`.
