@@ -1,30 +1,22 @@
 # Until Then (010019C023004000) bring-up
 
-Status: survey completed on Windows; no IPA or gameplay test yet.
+Status: IPA built and ZIP integrity checked for update v1.0.9. Gameplay has not been tested on an iPhone.
 
-## Tested package
+## Package and build
 
-- Base: v0; update: v589824 (display version 1.0.9).
-- Update `main` build ID: `53e2366a73ef1a06f185c5d80c13d642`.
-- SDK 19. Both NSZ files decompressed to NSP with NCA hash verification.
-- The update's RomFS manifest has 230,496 files (3,868.4 MB).
-- The extracted files and `RomFS.img` are under `D:\迅雷云盘\UntilThen\extract`; game data and keys are not in this repository.
+- Base v0 and update v589824; update `main` build ID `53e2366a73ef1a06f185c5d80c13d642`.
+- SDK 19. Both NSZ files were decompressed to NSP with NCA hash verification.
+- The merged RomFS image is 4,069,673,746 bytes and contains the base game plus update.
+- nxnative is pinned to `e5620b1a05a5b7374e0135d6312d3e90994eab81`.
+- GitHub Actions run [42039714477](https://github.com/Flamelovers/nxkit/actions/runs/42039714477) successfully built the slim IPA. The local merge produced `UntilThen-v1.0.9.ipa` (4,187,750,997 bytes); `zipfile.testzip()` returned no errors.
 
-## Engine and graphics evidence
+## Graphics work
 
-- This is a Godot build: the RomFS contains `.godot` exports, `.gdshader` resources and a `shader_cache` tree. The `main` NSO contains `Godot Engine` markers.
-- The package includes `subsdk0` (NintendoSDK_OpenGL) and `subsdk1` (NintendoSDK_Vulkan), both importing `nvnBootstrapLoaderInternal`. `main` imports `nvnBootstrapLoader`, but no `vk*` or `egl*` symbols directly. Its actual renderer must be established from the startup path, rather than inferred from these strings alone.
-- `shader_cache` contains 472 `.vulkan.cache` files. A sampled file begins with `GDSC` cache version 3 and a `GSBD` binary version 4. Godot 4.3's `shader_rd.cpp` and Vulkan driver source document these formats: the latter stores SPIR-V stages as Smol-V, optionally compressed again with Zstd. The sample contains no raw SPIR-V magic.
-- The current `profile_guess.py` selects `main sdk` and NVN based on `main`'s import. Its raw-SPIR-V scan does not see the shaders inside Godot's cache. This is insufficient to build a working shader package for this game.
+- This is a Godot game with Vulkan shader caches. `tools/godot_cache_extract.py` reads the `GDSC`/`GSBD` cache records and the Godot Smol-V decoder expands them into SPIR-V during the cloud build.
+- The build decoded 3,364 unique SPIR-V shaders. The Metal output is split into 26 libraries of at most 128 functions; `hle_vk.m` loads each library by the index recorded in `vk_shaders.tsv`.
+- Godot's second color output is a second render target, so this game disables nxnative's dual-source blend shader variant.
+- The current Vulkan translator skips 72 compute shader stages. Rendering and gameplay may therefore fail or be incomplete. The selected renderer and runtime shader usage need testing on a device.
 
-## Build-chain issue
+## Next validation
 
-`Flamelovers/nxkit` still pins `NXNATIVE_REF=2db12f7`, but its current Windows patches target later nxnative code. `nxkit.py setup` fails applying `0000-windows-paths.patch` at `shader_split.py:1759`. The fork needs a compatible pinned nxnative commit and a patch refresh before its one-command build can run reliably. Do not advance the pin without checking every general and game patch on both Windows and the Mac runner.
-
-## Next work
-
-1. Determine from the updated `main`'s startup path which renderer is selected, and which of the OpenGL/Vulkan subsdk modules it loads.
-2. Add a bounded reader for Godot `GDSC`/`GSBD` cache files and decode the Smol-V stages into SPIR-V. Validate stage counts and decoded magic across the full cache, including custom `.gdshader` variants.
-3. Feed the decoded shaders to `vk_shaders.py` if the runtime uses Vulkan, then survey any shaders generated after launch. If it uses NVN, identify the actual NVN program data instead.
-4. Refresh nxkit's nxnative pin and patches, generate a provisional profile for this exact build, and run the PC preparation and cloud build.
-5. Test the IPA on a device; use `Documents/log.txt` to debug boot, rendering, audio and memory before marking the game playable.
+Install the IPA on a compatible iPhone and inspect `Documents/log.txt` after launch. Verify boot, graphics, input, audio and memory. Capture missing shader modules or unsupported Vulkan calls and extend the bridge before describing the game as playable.
