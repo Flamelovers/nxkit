@@ -1,0 +1,20 @@
+diff --git a/dm/gfx/vk/hle_vk.m b/dm/gfx/vk/hle_vk.m
+--- a/dm/gfx/vk/hle_vk.m
++++ b/dm/gfx/vk/hle_vk.m
+@@ -126,6 +126,6 @@ static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_m
+ // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
+ typedef struct { char kind; uint8_t set, slot, count; uint16_t binding; } shres;   // count: an array of descriptors, elements in slots slot … slot + count − 1
+-typedef struct { char key[17]; int frag, nres, lib; shres res[24]; } shinfo;
++typedef struct { char key[17]; int frag, nres, lib; shres res[64]; } shinfo;
+ static shinfo *g_sh; static int g_nsh;
+ static id<MTLLibrary> g_lib[64]; static int g_nlib;
+ static int sh_cmp(const void *a, const void *b) { return memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); }
+@@ -146,7 +146,7 @@ static void sh_load(void) {
+         if (rest) { char *src = strsep(&rest, "\t\n"); (void)src; if (rest) s->lib = atoi(rest); }
+         for (char *t = res ? strtok(res, " ") : NULL; t; t = strtok(NULL, " ")) {
+             char k; unsigned st, b, sl, n = 1;
+-            if (sscanf(t, "%c:%u.%u=%u*%u", &k, &st, &b, &sl, &n) < 4 || !n || sl + n > 31 || s->nres == 24) { LOG("[vk] [RED] cannot parse a resource entry of shader table %s: %s", s->key, t); continue; }
++            if (sscanf(t, "%c:%u.%u=%u*%u", &k, &st, &b, &sl, &n) < 4 || !n || sl + n > 31 || s->nres == 64) { LOG("[vk] [RED] cannot parse a resource entry of shader table %s: %s", s->key, t); continue; }
+             s->res[s->nres++] = (shres){k, (uint8_t)st, (uint8_t)sl, (uint8_t)n, (uint16_t)b};
+         }
+     }

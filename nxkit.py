@@ -279,6 +279,16 @@ def prepare(repo, commit, nsp_dir, keys, kit_zip, package=None, app_name=None, l
         cache = work / 'godot-smolv'
         run([py, HERE / 'tools/godot_cache_extract.py', romfs, cache, '--nxnative', repo])
         shutil.copytree(cache, kit / 'godot-smolv')
+        capture = work / 'vk_capture'
+        if capture.is_dir():
+            import hashlib
+            for p in sorted(capture.glob('*.spv')):
+                data = p.read_bytes()
+                if data[:4] != b'\x03\x02\x23\x07' or p.stem != hashlib.sha256(data).hexdigest()[:16]:
+                    raise KitError(f'invalid captured shader: {p}')
+                d = kit / 'game/RomFS/captured_spirv' / p.name
+                d.parent.mkdir(parents=True, exist_ok=True)
+                d.write_bytes(data)
     if gfx == 'nvn': shutil.copytree(work / 'shader/pkg', kit / 'shader/pkg')
     meta = dict(nxnative_commit=commit, game=g.id, title=f'{app:016X}', package=pkg_ver, gfx=gfx, derived=bool(derived), app_name=app_name, bundle_id=bundle_id,
                 app_version=app_version or '', language=lang, show_fps=bool(show_fps), icon=bool(icon))
