@@ -71,8 +71,12 @@ jobs:
           TAG: ${{ inputs.kit_tag }}
         run: |
           mkdir -p "$RUNNER_TEMP/kit"
-          gh release download "$TAG" --pattern '*.nxk' --dir "$RUNNER_TEMP/kit"
-          gh release delete "$TAG" --yes --cleanup-tag
+          if [ -f nxkit/kit_parts/000.part ]; then
+            cat nxkit/kit_parts/*.part > "$RUNNER_TEMP/kit/until-then-kit.nxk"
+          else
+            gh release download "$TAG" --pattern '*.nxk' --dir "$RUNNER_TEMP/kit"
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
 
       - name: Decrypt the build kit
         env:
