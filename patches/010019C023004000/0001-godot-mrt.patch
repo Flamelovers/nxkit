@@ -1,0 +1,10 @@
+diff --git a/dm/gfx/tools/vk_shaders.py b/dm/gfx/tools/vk_shaders.py
+--- a/dm/gfx/tools/vk_shaders.py
++++ b/dm/gfx/tools/vk_shaders.py
+@@ -138,5 +138,5 @@ def one(path, tmp, root):
+     src = PRECISE.sub(r'precise::\1(', src); open(msl, 'w').write(src)
+     msls = [msl]
+-    if stage == 'frag' and '[[color(1)]]' in src:   # dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0
++    if stage == 'frag' and '[[color(1)]]' in src and not os.environ.get('DM_VK_NO_DUAL_SOURCE'):   # Godot uses multiple render targets, not dual-source blending
+         msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
+         open(msl_d, 'w').write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
