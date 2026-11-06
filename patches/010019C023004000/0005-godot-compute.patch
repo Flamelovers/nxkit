@@ -9,15 +9,6 @@
      dec = decorations(words)
      by_pair, count = {}, {}
      for k, kind in KINDS.items():
-@@ -137,7 +137,7 @@
-     res = [x for x in res if (SLOT_CLASS[x[0]], int(x.rsplit('=', 1)[1].split('*')[0])) in used]
-     src = PRECISE.sub(r'precise::\1(', src); open(msl, 'w').write(src)
-     msls = [msl]
--    if stage == 'frag' and '[[color(1)]]' in src and not os.environ.get('DM_VK_NO_DUAL_SOURCE'):   # Godot uses multiple render targets, not dual-source blending
-+    if stage == 'frag' and '[[color(1)]]' in src:   # dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0
-         msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
-         open(msl_d, 'w').write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
-     return key, stage, res, msls, '/' + os.path.relpath(path, root)
 --- a/dm/gfx/vk/hle_vk.m
 +++ b/dm/gfx/vk/hle_vk.m
 @@ -126,7 +126,7 @@
