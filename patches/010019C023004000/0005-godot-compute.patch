@@ -1,0 +1,293 @@
+--- a/dm/gfx/tools/vk_shaders.py
++++ b/dm/gfx/tools/vk_shaders.py
+@@ -89,7 +89,7 @@
+     eps = refl.get('entryPoints', [])
+     if len(eps) != 1: red(f'{path}: entry points {eps} are not exactly one')
+     stage = eps[0]['mode']
+-    if stage not in ('vert', 'frag'): return stage   # skipped (main counts them)
++    if stage not in ('vert', 'frag', 'comp'): return stage   # skipped (main counts them)
+     dec = decorations(words)
+     by_pair, count = {}, {}
+     for k, kind in KINDS.items():
+@@ -137,7 +137,7 @@
+     res = [x for x in res if (SLOT_CLASS[x[0]], int(x.rsplit('=', 1)[1].split('*')[0])) in used]
+     src = PRECISE.sub(r'precise::\1(', src); open(msl, 'w').write(src)
+     msls = [msl]
+-    if stage == 'frag' and '[[color(1)]]' in src and not os.environ.get('DM_VK_NO_DUAL_SOURCE'):   # Godot uses multiple render targets, not dual-source blending
++    if stage == 'frag' and '[[color(1)]]' in src:   # dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0
+         msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
+         open(msl_d, 'w').write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
+     return key, stage, res, msls, '/' + os.path.relpath(path, root)
+--- a/dm/gfx/vk/hle_vk.m
++++ b/dm/gfx/vk/hle_vk.m
+@@ -126,7 +126,7 @@
+ // Shader table (<DM_MSL_DIR>/vk/vk_shaders.tsv): resource kind u / b / t / s / c, its (set, binding) in the game's SPIR-V and the Metal slot it was moved to;
+ // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
+ typedef struct { char kind; uint8_t set, slot, count; uint16_t binding; } shres;   // count: an array of descriptors, elements in slots slot … slot + count − 1
+-typedef struct { char key[17]; int frag, nres, lib; shres res[64]; } shinfo;
++typedef struct { char key[17]; int frag, comp, nres, lib; shres res[64]; } shinfo;
+ static shinfo *g_sh; static int g_nsh;
+ static id<MTLLibrary> g_lib[64]; static int g_nlib;
+ static int sh_cmp(const void *a, const void *b) { return memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); }
+@@ -143,7 +143,7 @@
+         if (!key || !stage || strlen(key) != 16) continue;
+         if (g_nsh == cap) { cap = cap ? cap * 2 : 128; g_sh = realloc(g_sh, cap * sizeof *g_sh); }
+         shinfo *s = &g_sh[g_nsh++]; memset(s, 0, sizeof *s);
+-        memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag");
++        memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag"); s->comp = !strcmp(stage, "comp");
+         if (rest) { char *src = strsep(&rest, "\t\n"); (void)src; if (rest) s->lib = atoi(rest); }
+         for (char *t = res ? strtok(res, " ") : NULL; t; t = strtok(NULL, " ")) {
+             char k; unsigned st, b, sl, n = 1;
+@@ -193,7 +193,7 @@
+                   VkImageUsageFlags usage; uint32_t pitch; };   // pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
+ struct VkImageView_T { __strong id<MTLTexture> tex; VkImage img; };
+ struct VkSampler_T { __strong id<MTLSamplerState> s; };
+-struct VkShaderModule_T { const shinfo *si; __strong id<MTLFunction> fn, fn_d; char key[17]; int tried_d; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
++struct VkShaderModule_T { const shinfo *si; __strong id<MTLFunction> fn, fn_d; char key[17]; int tried_d; uint32_t wg[3]; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
+ struct VkPipelineCache_T { int unused; };
+ // Query pool: a result is valid once the submit that wrote it has completed (g_done >= ticket). Timestamps are the completion time of their submit (in ns,
+ // timestampPeriod 1), the same for every timestamp of one submit; occlusion results are copied from the submit's visibility buffer when it completes
+@@ -221,7 +221,8 @@
+ struct VkFramebuffer_T { uint32_t n, w, h, layers; VkImageView v[16]; };
+ struct VkPipeline_T {
+     __strong id<MTLRenderPipelineState> pso; __strong id<MTLDepthStencilState> dss;
+-    const shinfo *vs, *fs; uint32_t vb_mask; VkPipelineLayout layout;
++    __strong id<MTLComputePipelineState> cpso;
++    const shinfo *vs, *fs, *cs; uint32_t vb_mask, wg[3]; VkPipelineLayout layout;
+     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
+     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
+     int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
+@@ -804,6 +805,14 @@
+     (void)d; (void)a; dev_init();
+     uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(ci->pCode, (CC_LONG)ci->codeSize, h);
+     VkShaderModule m = zalloc(sizeof *m);
++    m->wg[0] = m->wg[1] = m->wg[2] = 1;
++    const uint32_t *w = ci->pCode; size_t nw = ci->codeSize / sizeof(uint32_t);
++    for (size_t i = 5; i < nw;) {
++        uint32_t n = w[i] >> 16;
++        if (!n || i + n > nw) break;
++        if ((w[i] & 0xffff) == 16 && n >= 6 && w[i + 2] == 17) { m->wg[0] = w[i + 3]; m->wg[1] = w[i + 4]; m->wg[2] = w[i + 5]; break; }
++        i += n;
++    }
+     for (int i = 0; i < 8; i++) snprintf(m->key + 2 * i, 3, "%02x", h[i]);
+     sh_capture(m->key, ci->pCode, ci->codeSize);
+     m->si = sh_find(m->key);
+@@ -956,14 +965,30 @@
+     for (uint32_t i = 0; i < n; i++) out[i] = pipe_make(&ci[i]);   // a pipeline Metal refuses is still handed out: its draws are skipped
+     return VK_SUCCESS;
+ }
+-VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; free(p); } }
++VKB(vkCreateComputePipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t n, const VkComputePipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
++    (void)d; (void)c; (void)a; dev_init();
++    for (uint32_t i = 0; i < n; i++) {
++        VkPipeline p = zalloc(sizeof *p); p->layout = ci[i].layout;
++        VkShaderModule m = ci[i].stage.module; p->cs = m ? m->si : NULL;
++        if (m) memcpy(p->wg, m->wg, sizeof p->wg);
++        if (ci[i].stage.pSpecializationInfo && ci[i].stage.pSpecializationInfo->mapEntryCount) RED1("compute specialization constants not implemented");
++        NSError *err = nil;
++        if (m && m->fn) p->cpso = [g_dev newComputePipelineStateWithFunction:m->fn error:&err];
++        if (!p->cpso) LOG("[vk] [RED] cannot build compute pipeline (%s): %s", m ? m->key : "null", err.localizedDescription.UTF8String);
++        out[i] = p;
++    }
++    return VK_SUCCESS;
++}
++VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->cpso = nil; p->dss = nil; free(p); } }
+ 
+ // ---------- Command buffers: recording ----------
+-enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND };
++enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_DISPATCH, C_DISPATCH_INDIRECT };
+ typedef struct { uint32_t op, size; } chdr;
+ typedef struct { VkRenderPass rp; VkFramebuffer fb; VkRect2D area; uint32_t nclear; VkClearValue clear[]; } c_brp;
+-typedef struct { VkPipeline p; } c_pipe;
+-typedef struct { uint32_t first, n, ndyn; VkDescriptorSet s[8]; uint32_t dyn[]; } c_sets;
++typedef struct { VkPipeline p; VkPipelineBindPoint bp; } c_pipe;
++typedef struct { VkPipelineBindPoint bp; uint32_t first, n, ndyn; VkDescriptorSet s[8]; uint32_t dyn[]; } c_sets;
++typedef struct { uint32_t x, y, z; } c_dispatch;
++typedef struct { VkBuffer b; VkDeviceSize off; } c_dispatch_indirect;
+ typedef struct { uint32_t first, n; VkBuffer b[14]; VkDeviceSize o[14]; } c_vb;
+ typedef struct { VkBuffer b; VkDeviceSize o; VkIndexType t; } c_ib;
+ typedef struct { VkViewport v; } c_vp;
+@@ -1018,13 +1043,23 @@
+ }
+ VK(vkCmdEndRenderPass, void, VkCommandBuffer cb) { rec(cb, C_ERP, 0); }
+ VK(vkCmdBindPipeline, void, VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
+-    if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS) { RED1("compute pipelines not implemented"); return; }
+-    ((c_pipe *)rec(cb, C_PIPE, sizeof(c_pipe)))->p = p;
++    if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS && bp != VK_PIPELINE_BIND_POINT_COMPUTE) return;
++    *(c_pipe *)rec(cb, C_PIPE, sizeof(c_pipe)) = (c_pipe){p, bp};
+ }
+ VK(vkCmdBindDescriptorSets, void, VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout l, uint32_t first, uint32_t n, const VkDescriptorSet *s, uint32_t ndyn, const uint32_t *dyn) {
+-    (void)l; if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
++    (void)l; if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS && bp != VK_PIPELINE_BIND_POINT_COMPUTE) return;
+     c_sets *c = rec(cb, C_SETS, sizeof *c + ndyn * sizeof(uint32_t));
+-    c->first = first; c->n = umin(n, 8); c->ndyn = ndyn; memcpy(c->s, s, c->n * sizeof *s); if (ndyn) memcpy(c->dyn, dyn, ndyn * sizeof *dyn);
++    c->bp = bp; c->first = first; c->n = umin(n, 8); c->ndyn = ndyn; memcpy(c->s, s, c->n * sizeof *s); if (ndyn) memcpy(c->dyn, dyn, ndyn * sizeof *dyn);
++}
++VK(vkCmdDispatch, void, VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
++    *(c_dispatch *)rec(cb, C_DISPATCH, sizeof(c_dispatch)) = (c_dispatch){x, y, z};
++}
++VK(vkCmdDispatchBase, void, VkCommandBuffer cb, uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y, uint32_t z) {
++    if (bx || by || bz) RED1("nonzero dispatch base not implemented");
++    h_vkCmdDispatch(cb, x, y, z);
++}
++VK(vkCmdDispatchIndirect, void, VkCommandBuffer cb, VkBuffer b, VkDeviceSize off) {
++    *(c_dispatch_indirect *)rec(cb, C_DISPATCH_INDIRECT, sizeof(c_dispatch_indirect)) = (c_dispatch_indirect){b, off};
+ }
+ VK(vkCmdBindVertexBuffers, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *b, const VkDeviceSize *o) {
+     c_vb *c = rec(cb, C_VB, sizeof *c); c->first = first; c->n = first < 14 ? umin(n, 14 - first) : 0;
+@@ -1072,9 +1107,10 @@
+ typedef struct { VkQueryPool q; uint32_t idx, slot; } occ_t;
+ typedef struct { uint64_t v; id<MTLBuffer> vis; uint32_t nvis, cap; occ_t *occ; } subq_t;
+ typedef struct {
+-    id<MTLCommandBuffer> cb; id<MTLRenderCommandEncoder> re; id<MTLBlitCommandEncoder> be;
+-    VkPipeline pipe, applied; uint32_t rt_w, rt_h;
++    id<MTLCommandBuffer> cb; id<MTLRenderCommandEncoder> re; id<MTLBlitCommandEncoder> be; id<MTLComputeCommandEncoder> ce;
++    VkPipeline pipe, cpipe, applied; uint32_t rt_w, rt_h;
+     struct { VkDescriptorSet s; uint32_t dyn[16]; } set[8];
++    struct { VkDescriptorSet s; uint32_t dyn[16]; } cset[8];
+     VkBuffer vb[14]; VkDeviceSize vbo[14];
+     VkBuffer ib; VkDeviceSize ibo; MTLIndexType it; uint32_t isz;
+     VkViewport vp; VkRect2D sc; int have_vp, have_sc, vp_dirty, sc_dirty;
+@@ -1087,6 +1123,7 @@
+ #define DONE_RING 1024
+ static uint64_t g_done_ns[DONE_RING];   // completion time of submit v at [v % DONE_RING] (timestamp query results)
+ static void end_blit(rs_t *s) { if (s->be) { [s->be endEncoding]; s->be = nil; } }
++static void end_compute(rs_t *s) { if (s->ce) { [s->ce endEncoding]; s->ce = nil; } }
+ static MTLStoreAction keep(MTLStoreAction a) { return a == MTLStoreActionMultisampleResolve || a == MTLStoreActionStoreAndMultisampleResolve ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore; }
+ static void end_rp(rs_t *s, int final) {   // final: the pass's own store actions; otherwise everything is stored, to be loaded again when the pass resumes
+     if (!s->re) return;
+@@ -1099,12 +1136,14 @@
+ // A copy inside a render pass, which NVIDIA's driver runs: Super Mario Galaxy copies from its EFB in the middle of a pass (vkCmdCopyImage). The encoder ends here and
+ // the pass resumes at its next draw (resume_rp); without that, the rest of the pass's draws were dropped
+ static id<MTLBlitCommandEncoder> blit(rs_t *s, uint32_t op) {
++    end_compute(s);
+     if (s->re) { static int n; if (n++ < 3) OLOG("copy inside a render pass (command %u): the pass is split and the next draw continues it", op); end_rp(s, 0); s->cut = 1; }
+     if (!s->be) s->be = [s->cb blitCommandEncoder];
+     return s->be;
+ }
+ static void resume_rp(rs_t *s) {
+     end_blit(s);
++    end_compute(s);
+     MTLRenderPassDescriptor *d = s->rpd;
+     for (int i = 0; i < 8; i++) if (d.colorAttachments[i].texture) d.colorAttachments[i].loadAction = MTLLoadActionLoad;
+     if (d.depthAttachment.texture) d.depthAttachment.loadAction = MTLLoadActionLoad;
+@@ -1116,6 +1155,7 @@
+ static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
+ static void begin_rp(rs_t *s, const c_brp *c) {
+     end_blit(s);
++    end_compute(s);
+     end_rp(s, 1); s->cut = 0;
+     VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
+     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+@@ -1155,16 +1195,17 @@
+ static void bind_res(rs_t *s, const shinfo *si, int frag) {
+     if (!si) return;
+     id<MTLRenderCommandEncoder> re = s->re;
++    id<MTLComputeCommandEncoder> ce = s->ce;
+     for (int i = 0; i < si->nres; i++) {
+         const shres *r = &si->res[i];
+         if (r->kind == 'p') continue;   // bind_push
+-        VkDescriptorSet ds = r->set < 8 ? s->set[r->set].s : NULL;
++        VkDescriptorSet ds = r->set < 8 ? (si->comp ? s->cset[r->set].s : s->set[r->set].s) : NULL;
+         if (!ds) { RED1("shader %s: set %u is not bound", si->key, r->set); continue; }
+         const VkDescriptorSetLayout L = ds->L; int bi = r->binding < 128 ? L->idx[r->binding] : -1;
+         if (bi < 0 || !L->b[bi].count) {
+             char have[256] = ""; size_t o = 0;
+             for (uint32_t k = 0; k < L->n && o + 8 < sizeof have; k++) o += snprintf(have + o, sizeof have - o, " %u", L->b[k].binding);
+-            const VkPipelineLayout pl = s->pipe->layout; const VkDescriptorSetLayout PL = pl && r->set < pl->nset ? pl->set[r->set] : NULL;
++            const VkPipelineLayout pl = si->comp ? s->cpipe->layout : s->pipe->layout; const VkDescriptorSetLayout PL = pl && r->set < pl->nset ? pl->set[r->set] : NULL;
+             RED1("shader %s: %u.%u is not in the bound set's layout %p (it has:%s); the pipeline layout's set %u is %p%s", si->key, r->set, r->binding, (void *)L, have, r->set, (void *)PL,
+                  PL && r->binding < 128 && PL->idx[r->binding] >= 0 ? ", which has this binding: the set was not rebound with the pipeline" : "");
+             continue;
+@@ -1175,19 +1216,19 @@
+             switch (r->kind) {
+                 case 'u': case 'b': {
+                     if (!e->buf) { RED1("shader %s: buffer %u.%u[%u] is empty", si->key, r->set, r->binding, k); break; }
+-                    VkDeviceSize off = e->off; if (lb->dyn >= 0 && lb->dyn + k < 16) off += s->set[r->set].dyn[lb->dyn + k];
+-                    if (frag) [re setFragmentBuffer:e->buf offset:off atIndex:slot]; else [re setVertexBuffer:e->buf offset:off atIndex:slot];
++                    VkDeviceSize off = e->off; if (lb->dyn >= 0 && lb->dyn + k < 16) off += si->comp ? s->cset[r->set].dyn[lb->dyn + k] : s->set[r->set].dyn[lb->dyn + k];
++                    if (si->comp) [ce setBuffer:e->buf offset:off atIndex:slot]; else if (frag) [re setFragmentBuffer:e->buf offset:off atIndex:slot]; else [re setVertexBuffer:e->buf offset:off atIndex:slot];
+                     break;
+                 }
+                 case 't': case 'c': {
+                     if (!e->tex) { RED1("shader %s: texture %u.%u[%u] is empty", si->key, r->set, r->binding, k); break; }
+-                    if (frag) [re setFragmentTexture:e->tex atIndex:slot]; else [re setVertexTexture:e->tex atIndex:slot];
+-                    if (r->kind == 'c' && e->smp) { if (frag) [re setFragmentSamplerState:e->smp atIndex:slot]; else [re setVertexSamplerState:e->smp atIndex:slot]; }
++                    if (si->comp) [ce setTexture:e->tex atIndex:slot]; else if (frag) [re setFragmentTexture:e->tex atIndex:slot]; else [re setVertexTexture:e->tex atIndex:slot];
++                    if (r->kind == 'c' && e->smp) { if (si->comp) [ce setSamplerState:e->smp atIndex:slot]; else if (frag) [re setFragmentSamplerState:e->smp atIndex:slot]; else [re setVertexSamplerState:e->smp atIndex:slot]; }
+                     break;
+                 }
+                 case 's':
+                     if (!e->smp) { RED1("shader %s: sampler %u.%u[%u] is empty", si->key, r->set, r->binding, k); break; }
+-                    if (frag) [re setFragmentSamplerState:e->smp atIndex:slot]; else [re setVertexSamplerState:e->smp atIndex:slot];
++                    if (si->comp) [ce setSamplerState:e->smp atIndex:slot]; else if (frag) [re setFragmentSamplerState:e->smp atIndex:slot]; else [re setVertexSamplerState:e->smp atIndex:slot];
+                     break;
+             }
+         }
+@@ -1197,8 +1238,8 @@
+     if (!si) return;
+     for (int i = 0; i < si->nres; i++) {
+         if (si->res[i].kind != 'p') continue;
+-        const VkPipelineLayout l = s->pipe->layout; uint32_t n = (umax(l ? l->pc_size : 0, 16) + 15) & ~15u;
+-        if (frag) [s->re setFragmentBytes:s->pc length:n atIndex:si->res[i].slot]; else [s->re setVertexBytes:s->pc length:n atIndex:si->res[i].slot];
++        const VkPipelineLayout l = si->comp ? s->cpipe->layout : s->pipe->layout; uint32_t n = (umax(l ? l->pc_size : 0, 16) + 15) & ~15u;
++        if (si->comp) [s->ce setBytes:s->pc length:n atIndex:si->res[i].slot]; else if (frag) [s->re setFragmentBytes:s->pc length:n atIndex:si->res[i].slot]; else [s->re setVertexBytes:s->pc length:n atIndex:si->res[i].slot];
+     }
+ }
+ static int pre_draw(rs_t *s) {
+@@ -1238,19 +1279,44 @@
+         }
+     return 1;
+ }
++static void dispatch(rs_t *s, uint32_t x, uint32_t y, uint32_t z) {
++    VkPipeline p = s->cpipe;
++    if (!x || !y || !z || !p || !p->cpso) return;
++    if (s->re) { RED1("compute dispatch inside a render pass"); return; }
++    end_blit(s);
++    if (!s->ce) s->ce = [s->cb computeCommandEncoder];
++    [s->ce setComputePipelineState:p->cpso];
++    bind_res(s, p->cs, 0); bind_push(s, p->cs, 0);
++    [s->ce dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(p->wg[0], p->wg[1], p->wg[2])];
++}
+ static void replay(rs_t *s, VkCommandBuffer cb) {
+     for (size_t o = 0; o < cb->n;) {
+         const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
+         switch (h->op) {
+             case C_BRP: begin_rp(s, c); break;
+             case C_ERP: end_rp(s, 1); s->cut = 0; s->rpd = nil; break;
+-            case C_PIPE: s->pipe = ((const c_pipe *)c)->p; break;
++            case C_PIPE: { const c_pipe *x = c; if (x->bp == VK_PIPELINE_BIND_POINT_COMPUTE) s->cpipe = x->p; else s->pipe = x->p; break; }
+             case C_SETS: {
+                 const c_sets *x = c; uint32_t k = 0;
+                 for (uint32_t i = 0; i < x->n && x->first + i < 8; i++) {
+-                    uint32_t si = x->first + i; VkDescriptorSet ds = x->s[i]; s->set[si].s = ds;
+-                    for (uint32_t j = 0; ds && j < ds->L->ndyn; j++, k++) if (j < 16) s->set[si].dyn[j] = k < x->ndyn ? x->dyn[k] : 0;
++                    uint32_t si = x->first + i; VkDescriptorSet ds = x->s[i];
++                    if (x->bp == VK_PIPELINE_BIND_POINT_COMPUTE) s->cset[si].s = ds; else s->set[si].s = ds;
++                    for (uint32_t j = 0; ds && j < ds->L->ndyn; j++, k++) if (j < 16) {
++                        if (x->bp == VK_PIPELINE_BIND_POINT_COMPUTE) s->cset[si].dyn[j] = k < x->ndyn ? x->dyn[k] : 0;
++                        else s->set[si].dyn[j] = k < x->ndyn ? x->dyn[k] : 0;
++                    }
+                 }
++                break;
++            }
++            case C_DISPATCH: { const c_dispatch *x = c; dispatch(s, x->x, x->y, x->z); break; }
++            case C_DISPATCH_INDIRECT: {
++                const c_dispatch_indirect *x = c;
++                if (!x->b || !x->b->mem || !s->cpipe || !s->cpipe->cpso) break;
++                if (s->re) { RED1("indirect compute dispatch inside a render pass"); break; }
++                end_blit(s); if (!s->ce) s->ce = [s->cb computeCommandEncoder];
++                [s->ce setComputePipelineState:s->cpipe->cpso];
++                bind_res(s, s->cpipe->cs, 0); bind_push(s, s->cpipe->cs, 0);
++                [s->ce dispatchThreadgroupsWithIndirectBuffer:mem_buf(x->b->mem) indirectBufferOffset:x->b->off + x->off threadsPerThreadgroup:MTLSizeMake(s->cpipe->wg[0], s->cpipe->wg[1], s->cpipe->wg[2])];
+                 break;
+             }
+             case C_VB: { const c_vb *x = c; for (uint32_t i = 0; i < x->n; i++) { s->vb[x->first + i] = x->b[i]; s->vbo[x->first + i] = x->o[i]; } break; }
+@@ -1359,6 +1425,7 @@
+     }
+     if (s->re || s->cut) { RED1("render pass not ended when the command buffer ended"); end_rp(s, 1); s->cut = 0; }
+     end_blit(s);
++    end_compute(s);
+ }
+ 
+ // ---------- Queue, fences, semaphores ----------
