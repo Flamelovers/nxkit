@@ -1,0 +1,119 @@
+--- a/dm/host/memstat.m
++++ b/dm/host/memstat.m
+@@ -91,6 +91,7 @@
+ static void *memstat_thread(void *p) {
+     FILE *f = fopen((const char *)p, "w");
+     if (!f) { LOG("memstat: cannot open %s", (const char *)p); return NULL; }
++    LOG("memstat: writing %s", (const char *)p);
+     fprintf(f, "# unit MiB; kernel accounting internal / compressed / graphics ledger / headroom to the limit; class columns = virtual/resident/charged (deduplicated per object); charged total = Σ private charged; unattributed = phys_footprint − charged total\nseconds\tphys_footprint\tavailable\tmetal_alloc\tinternal\tcompressed\tgraphics\theadroom");
+     for (int c = 0; c < NC; c++) fprintf(f, "\t%s", k_cls[c]);
+     fprintf(f, "\tcharged total\tunattributed\n");
+@@ -102,7 +103,12 @@
+     return NULL;
+ }
+ 
+-__attribute__((constructor)) static void memstat_start(void) {
++// iOS reads Documents/env.txt after constructors run. The front end calls this once after loading it.
++#if TARGET_OS_IPHONE
++void dm_memstat_start(void) {
++#else
++__attribute__((constructor)) static void dm_memstat_start(void) {
++#endif
+     const char *p = getenv("DM_MEMSTAT");
+     if (!p || !*p) return;
+     char *path = strdup(p);
+--- a/dm/ios/Sources/main.m
++++ b/dm/ios/Sources/main.m
+@@ -182,6 +182,8 @@
+     NSString *pso = [res stringByAppendingPathComponent:@"pso"];   // the pipeline archive made offline (build_ipa.sh, dm/gfx/tools/pso_offline.py): the shader pairs' bases, which the device then does not build
+     if ([fm fileExistsAtPath:pso]) setenv("DM_PSO_BUNDLE", pso.fileSystemRepresentation, 0);
+     chdir(doc.fileSystemRepresentation);
++    void dm_memstat_start(void);
++    dm_memstat_start();   // env.txt is now loaded; constructors ran before its DM_MEMSTAT value existed
+     g_argv[0] = strdup("dmhost"); g_argv[1] = strdup(dm.fileSystemRepresentation); g_argc = 2;
+     dm_host_preload_start(g_argc, g_argv);   // Module tables / relocation / takeover run early in the background, in parallel with UIKit startup (and the launcher: the settings it sets are read when the game starts)
+     return 1;
+--- a/dm/gfx/vk/hle_vk.m
++++ b/dm/gfx/vk/hle_vk.m
+@@ -566,6 +566,7 @@
+ }
+ VKB(vkDestroyImage, void, VkDevice d, VkImage im, const VkAllocationCallbacks *a) { (void)d; (void)a; if (im) { im->tex = nil; free(im); } }
+ VK(vkGetImageMemoryRequirements, void, VkDevice d, VkImage im, VkMemoryRequirements *r) {
++    OLOG("GetImageMemoryRequirements image %p", (void *)im);
+     (void)d; r->alignment = 4096; r->size = (im->size + 4095) & ~4095ull; r->memoryTypeBits = 7;
+ }
+ VK(vkGetImageMemoryRequirements2, void, VkDevice d, const VkImageMemoryRequirementsInfo2 *i, VkMemoryRequirements2 *r) {
+@@ -580,6 +581,7 @@
+     l->arrayPitch = l->depthPitch * dd; l->size = l->arrayPitch; l->offset = off + l->arrayPitch * sr->arrayLayer;
+ }
+ VKB(vkBindImageMemory, VkResult, VkDevice d, VkImage im, VkDeviceMemory m, VkDeviceSize off) {   // other images keep their own storage
++    OLOG("BindImageMemory image %p memory %p offset %llu", (void *)im, (void *)m, (unsigned long long)off);
+     (void)d; if (!im->pitch) return VK_SUCCESS;
+     id<MTLBuffer> b = mem_buf(m); if (!b) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+     @autoreleasepool {
+@@ -609,7 +611,9 @@
+ }
+ VKB(vkCreateImageView, VkResult, VkDevice d, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *a, VkImageView *out) {
+     (void)d; (void)a;
++    OLOG("CreateImageView begin image %p format %d view type %d", (void *)ci->image, ci->format, ci->viewType);
+     VkImage im = ci->image; const fmt_t *f = fmt_of(ci->format);
++    if (!im || !im->tex) { LOG("[vk] [RED] image view has no texture (image %p)", (void *)im); return VK_ERROR_INITIALIZATION_FAILED; }
+     MTLPixelFormat pf = f && f->pf != MTLPixelFormatInvalid ? f->pf : im->f->pf;
+     const VkImageSubresourceRange *r = &ci->subresourceRange;
+     if (r->aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT && pf == MTLPixelFormatDepth32Float_Stencil8) pf = MTLPixelFormatX32_Stencil8;
+@@ -636,7 +640,7 @@
+                                                   slices:NSMakeRange(tt == MTLTextureType3D ? 0 : r->baseArrayLayer, tt == MTLTextureType3D ? 1 : ly) swizzle:sw];
+         if (!v->tex) LOG("[vk] [RED] cannot create image view: format %d → %lu type %lu levels %u+%u layers %u+%u", im->fmt, (unsigned long)pf, (unsigned long)tt, r->baseMipLevel, lv, r->baseArrayLayer, ly);
+     }
+-    *out = v; return VK_SUCCESS;
++    *out = v; OLOG("CreateImageView end %p", (void *)v); return VK_SUCCESS;
+ }
+ VKB(vkDestroyImageView, void, VkDevice d, VkImageView v, const VkAllocationCallbacks *a) { (void)d; (void)a; if (v) { v->tex = nil; free(v); } }
+ 
+@@ -797,6 +801,7 @@
+ // ---------- Render passes, framebuffers ----------
+ VK(vkCreateRenderPass, VkResult, VkDevice d, const VkRenderPassCreateInfo *ci, const VkAllocationCallbacks *a, VkRenderPass *out) {
+     (void)d; (void)a;
++    OLOG("CreateRenderPass attachments %u subpasses %u", ci->attachmentCount, ci->subpassCount);
+     if (ci->attachmentCount > 16 || !ci->subpassCount) { LOG("[vk] [RED] render pass: %u attachments, %u subpasses", ci->attachmentCount, ci->subpassCount); return VK_ERROR_OUT_OF_HOST_MEMORY; }
+     if (ci->subpassCount > 1) RED1("render pass has %u subpasses: only the first is used", ci->subpassCount);
+     VkRenderPass rp = zalloc(sizeof *rp); rp->natt = ci->attachmentCount;
+@@ -817,6 +822,7 @@
+ VK(vkDestroyRenderPass, void, VkDevice d, VkRenderPass rp, const VkAllocationCallbacks *a) { (void)d; (void)rp; (void)a; }   // kept: recorded commands may still name it
+ VK(vkCreateFramebuffer, VkResult, VkDevice d, const VkFramebufferCreateInfo *ci, const VkAllocationCallbacks *a, VkFramebuffer *out) {
+     (void)d; (void)a;
++    OLOG("CreateFramebuffer renderpass %p attachments %u size %ux%u layers %u", (void *)ci->renderPass, ci->attachmentCount, ci->width, ci->height, ci->layers);
+     if (ci->attachmentCount > 16) { LOG("[vk] [RED] framebuffer with %u attachments", ci->attachmentCount); return VK_ERROR_OUT_OF_HOST_MEMORY; }
+     VkFramebuffer fb = zalloc(sizeof *fb); fb->n = ci->attachmentCount; fb->w = ci->width; fb->h = ci->height; fb->layers = ci->layers;
+     memcpy(fb->v, ci->pAttachments, fb->n * sizeof *fb->v);
+@@ -1008,11 +1014,14 @@
+ }
+ VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t n, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
+     (void)d; (void)c; (void)a; dev_init();
++    OLOG("CreateGraphicsPipelines begin %u", n);
+     for (uint32_t i = 0; i < n; i++) out[i] = pipe_make(&ci[i]);   // a pipeline Metal refuses is still handed out: its draws are skipped
++    OLOG("CreateGraphicsPipelines end %u", n);
+     return VK_SUCCESS;
+ }
+ VKB(vkCreateComputePipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t n, const VkComputePipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
+     (void)d; (void)c; (void)a; dev_init();
++    OLOG("CreateComputePipelines begin %u", n);
+     for (uint32_t i = 0; i < n; i++) {
+         VkPipeline p = zalloc(sizeof *p); p->layout = ci[i].layout;
+         VkShaderModule m = ci[i].stage.module; p->cs = m ? m->si : NULL;
+@@ -1023,6 +1032,7 @@
+         if (!p->cpso) LOG("[vk] [RED] cannot build compute pipeline (%s): %s", m ? m->key : "null", err.localizedDescription.UTF8String);
+         out[i] = p;
+     }
++    OLOG("CreateComputePipelines end %u", n);
+     return VK_SUCCESS;
+ }
+ VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->cpso = nil; p->dss = nil; free(p); } }
+@@ -1200,6 +1210,7 @@
+ static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : o == VK_ATTACHMENT_LOAD_OP_LOAD ? MTLLoadActionLoad : MTLLoadActionDontCare; }
+ static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
+ static void begin_rp(rs_t *s, const c_brp *c) {
++    OLOG("BeginRenderPass renderpass %p framebuffer %p", (void *)c->rp, (void *)c->fb);
+     end_blit(s);
+     end_compute(s);
+     end_rp(s, 1); s->cut = 0;
