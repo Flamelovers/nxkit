@@ -1,0 +1,101 @@
+--- a/dm/gfx/vk/hle_vk.m
++++ b/dm/gfx/vk/hle_vk.m
+@@ -111,6 +111,25 @@
+ }
+ static int fmt_has_depth(const fmt_t *f) { return f && (f->kind == K_DEPTH || f->kind == K_DS); }
+ static int fmt_has_stencil(const fmt_t *f) { return f && (f->kind == K_STENCIL || f->kind == K_DS); }
++// Formats Metal can expose as shader-writable textures. Keep this shared by format queries and image creation:
++// Godot rejects a render target before vkCreateImage when STORAGE_IMAGE is missing from the format properties.
++static int fmt_storage(const fmt_t *f) {
++    if (!f || (f->kind != K_COLOR && f->kind != K_INT)) return 0;
++    switch (f->vk) {
++        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT:
++        case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
++        case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT:
++        case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16_SFLOAT:
++        case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16_SFLOAT:
++        case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_UINT:
++        case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R16G16B16A16_SFLOAT:
++        case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_SFLOAT:
++        case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_SFLOAT:
++        case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_SFLOAT:
++            return 1;
++        default: return 0;
++    }
++}
+ 
+ // ---------- Device-wide state ----------
+ static id<MTLDevice> g_dev;
+@@ -330,6 +349,13 @@
+     if (!*n) return;
+     *n = 1; p[0] = (VkQueueFamilyProperties){VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, 16, 64, {1, 1, 1}};   // every VkQueue is the same serial Metal queue
+ }
++VK(vkGetPhysicalDeviceQueueFamilyProperties2, void, VkPhysicalDevice pd, uint32_t *n, VkQueueFamilyProperties2 *p) {
++    if (!p) { h_vkGetPhysicalDeviceQueueFamilyProperties(pd, n, NULL); return; }
++    VkQueueFamilyProperties q; uint32_t count = *n;
++    h_vkGetPhysicalDeviceQueueFamilyProperties(pd, &count, &q);
++    if (count) p[0].queueFamilyProperties = q;
++    *n = count;
++}
+ VK(vkGetPhysicalDeviceFormatProperties, void, VkPhysicalDevice pd, VkFormat format, VkFormatProperties *p) {
+     (void)pd; memset(p, 0, sizeof *p);
+     const fmt_t *f = fmt_of(format); if (!f) return;
+@@ -342,14 +368,19 @@
+         if (f->kind == K_COLOR) t |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+         p->bufferFeatures |= VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
+     }
++    if (fmt_storage(f)) t |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+     if (f->kind == K_DEPTH || f->kind == K_DS || f->kind == K_STENCIL) t |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+     p->optimalTilingFeatures = t;
+-    p->linearTilingFeatures = f->kind == K_COLOR || f->kind == K_INT ? t : 0;
++    p->linearTilingFeatures = f->kind == K_COLOR || f->kind == K_INT ? t & ~VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT : 0;
++}
++VK(vkGetPhysicalDeviceFormatProperties2, void, VkPhysicalDevice pd, VkFormat format, VkFormatProperties2 *p) {
++    h_vkGetPhysicalDeviceFormatProperties(pd, format, &p->formatProperties);
+ }
+ VK(vkGetPhysicalDeviceImageFormatProperties, VkResult, VkPhysicalDevice pd, VkFormat format, VkImageType type, VkImageTiling tiling, VkImageUsageFlags usage,
+    VkImageCreateFlags flags, VkImageFormatProperties *p) {
+     (void)pd; const fmt_t *f = fmt_of(format);
+     if (!f || f->pf == MTLPixelFormatInvalid) return VK_ERROR_FORMAT_NOT_SUPPORTED;
++    if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) && (tiling != VK_IMAGE_TILING_OPTIMAL || !fmt_storage(f))) return VK_ERROR_FORMAT_NOT_SUPPORTED;
+     memset(p, 0, sizeof *p);
+     p->maxExtent = type == VK_IMAGE_TYPE_3D ? (VkExtent3D){2048, 2048, 2048} : (VkExtent3D){16384, type == VK_IMAGE_TYPE_1D ? 1 : 16384, 1};
+     p->maxMipLevels = 15; p->maxArrayLayers = type == VK_IMAGE_TYPE_3D ? 1 : 2048;
+@@ -357,6 +388,9 @@
+                       (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) ? 0x7 : 1;
+     p->maxResourceSize = 1ull << 32;
+     return VK_SUCCESS;
++}
++VK(vkGetPhysicalDeviceImageFormatProperties2, VkResult, VkPhysicalDevice pd, const VkPhysicalDeviceImageFormatInfo2 *i, VkImageFormatProperties2 *p) {
++    return h_vkGetPhysicalDeviceImageFormatProperties(pd, i->format, i->type, i->tiling, i->usage, i->flags, &p->imageFormatProperties);
+ }
+ VK(vkGetImageSparseMemoryRequirements, void, VkDevice d, VkImage i, uint32_t *n, VkSparseImageMemoryRequirements *r) { (void)d; (void)i; (void)r; *n = 0; }
+ 
+@@ -487,6 +521,9 @@
+     (void)d; (void)a; dev_init();
+     const fmt_t *f = fmt_of(ci->format);
+     if (!f || f->pf == MTLPixelFormatInvalid) { LOG("[vk] [RED] image format %d not mapped", ci->format); return VK_ERROR_FORMAT_NOT_SUPPORTED; }
++    if ((ci->usage & VK_IMAGE_USAGE_STORAGE_BIT) && (ci->tiling != VK_IMAGE_TILING_OPTIMAL || !fmt_storage(f))) {
++        LOG("[vk] [RED] image format %d does not support storage usage", ci->format); return VK_ERROR_FORMAT_NOT_SUPPORTED;
++    }
+     // Linear 2D images with one level and layer alias their memory, as on the Switch: the texture is made over the bound buffer at vkBindImageMemory, with rows at
+     // Metal's linear-texture alignment (which vkGetImageSubresourceLayout reports). Super Mario Galaxy fills staging images from the CPU this way and samples a 4x4 one
+     if (ci->tiling == VK_IMAGE_TILING_LINEAR && ci->imageType == VK_IMAGE_TYPE_2D && ci->mipLevels <= 1 && ci->arrayLayers <= 1 && ci->samples <= 1 && f->kind != K_BLOCK && !fmt_has_depth(f) && !fmt_has_stencil(f)) {
+@@ -827,7 +864,16 @@
+     (void)d; (void)ci; (void)a; *out = zalloc(sizeof **out); return VK_SUCCESS;
+ }
+ VK(vkDestroyPipelineCache, void, VkDevice d, VkPipelineCache c, const VkAllocationCallbacks *a) { (void)d; (void)a; free(c); }
+-VK(vkGetPipelineCacheData, VkResult, VkDevice d, VkPipelineCache c, size_t *n, void *data) { (void)d; (void)c; (void)data; *n = 0; return VK_SUCCESS; }
++VK(vkGetPipelineCacheData, VkResult, VkDevice d, VkPipelineCache c, size_t *n, void *data) {
++    (void)d; (void)c;
++    // No host pipeline bytecode is portable to NVIDIA, but Vulkan still requires a nonempty header.
++    // Godot treats a zero-byte successful result as an error and repeatedly retries the cache update.
++    const struct { uint32_t size, version, vendor, device; uint8_t uuid[VK_UUID_SIZE]; } h =
++        {sizeof h, VK_PIPELINE_CACHE_HEADER_VERSION_ONE, 0x10de, 0x92ba, {0}};
++    if (!data) { *n = sizeof h; return VK_SUCCESS; }
++    if (*n < sizeof h) { *n = 0; return VK_INCOMPLETE; }
++    memcpy(data, &h, sizeof h); *n = sizeof h; return VK_SUCCESS;
++}
+ VK(vkMergePipelineCaches, VkResult, VkDevice d, VkPipelineCache dst, uint32_t n, const VkPipelineCache *src) { (void)d; (void)dst; (void)n; (void)src; return VK_SUCCESS; }
+ 
+ static MTLBlendFactor blend_f(VkBlendFactor f) {
