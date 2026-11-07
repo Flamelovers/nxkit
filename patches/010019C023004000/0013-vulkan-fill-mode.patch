@@ -1,0 +1,12 @@
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -11566,5 +11566,7 @@
+ static MTLViewport present_viewport(double cw, double ch, double dw, double dh) {
+-    double s = fmin(dw / cw, dh / ch);
++    static int fill = -1; if (fill < 0) { const char *e = getenv("DM_VK_FILL"); fill = e ? atoi(e) : 0; }
++    if (fill == 1) return (MTLViewport){0, 0, dw, dh, 0, 1};   // DM_VK_FILL=1: stretch to the whole screen
++    double s = fill == 2 ? fmax(dw / cw, dh / ch) : fmin(dw / cw, dh / ch);   // 2: fill the screen and crop the excess
+     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
+     if (fabs((dw / dh) / (cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
+     return vp;
