@@ -1,0 +1,64 @@
+--- a/dm/gfx/vk/hle_vk.m
++++ b/dm/gfx/vk/hle_vk.m
+@@ -1349,8 +1349,11 @@
+     [s->ce dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(p->wg[0], p->wg[1], p->wg[2])];
+ }
+ static void replay(rs_t *s, VkCommandBuffer cb) {
++    OLOG("Replay begin cb %p bytes %zu", (void *)cb, cb->n);
+     for (size_t o = 0; o < cb->n;) {
+-        const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
++        const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1;
++        OLOG("Replay command cb %p offset %zu op %u size %u", (void *)cb, o, h->op, h->size);
++        o += h->size;
+         switch (h->op) {
+             case C_BRP: begin_rp(s, c); break;
+             case C_ERP: end_rp(s, 1); s->cut = 0; s->rpd = nil; break;
+@@ -1485,6 +1488,7 @@
+     if (s->re || s->cut) { RED1("render pass not ended when the command buffer ended"); end_rp(s, 1); s->cut = 0; }
+     end_blit(s);
+     end_compute(s);
++    OLOG("Replay end cb %p", (void *)cb);
+ }
+ 
+ // ---------- Queue, fences, semaphores ----------
+@@ -1496,22 +1500,26 @@
+     pthread_mutex_unlock(&g_done_mu);
+ }
+ VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFence f) {
++    OLOG("QueueSubmit enter submits %u fence %p", n, (void *)f);
+     (void)q; dm_gfx_enter();   // blocks while the app is in the background (iOS allows no GPU work there)
++    OLOG("QueueSubmit graphics entered");
+     @autoreleasepool {
+         pthread_mutex_lock(&g_qmu);
+         id<MTLCommandBuffer> cb = [g_q commandBuffer];
+         subq_t *sq = zalloc(sizeof *sq); sq->v = g_ev_val + 1;
++        OLOG("QueueSubmit prescan begin metal cb %p", (__bridge void *)cb);
+         for (uint32_t i = 0; i < n; i++)   // occlusion queries need a visibility buffer before the first render pass is encoded
+             for (uint32_t j = 0; j < si[i].commandBufferCount; j++) {
+                 VkCommandBuffer c = si[i].pCommandBuffers[j];
+                 for (size_t o = 0; o < c->n; o += ((const chdr *)(c->buf + o))->size) sq->cap += ((const chdr *)(c->buf + o))->op == C_QBEGIN;
+             }
++        OLOG("QueueSubmit prescan end queries %u", sq->cap);
+         if (sq->cap) {
+             sq->vis = [g_dev newBufferWithLength:sq->cap * 8 options:MTLResourceStorageModeShared]; memset(sq->vis.contents, 0, sq->cap * 8);
+             sq->occ = zalloc(sq->cap * sizeof *sq->occ);
+         }
+         for (uint32_t i = 0; i < n; i++)
+-            for (uint32_t j = 0; j < si[i].commandBufferCount; j++) { rs_t s = {0}; s.cb = cb; s.sq = sq; replay(&s, si[i].pCommandBuffers[j]); }
++            for (uint32_t j = 0; j < si[i].commandBufferCount; j++) { OLOG("QueueSubmit replay %u/%u cb %p", i, j, (void *)si[i].pCommandBuffers[j]); rs_t s = {0}; s.cb = cb; s.sq = sq; replay(&s, si[i].pCommandBuffers[j]); }
+         uint64_t v = ++g_ev_val;
+         [cb encodeSignalEvent:g_ev value:v];
+         if (f) atomic_store(&f->val, v);
+@@ -1523,10 +1531,12 @@
+             done_advance(v);   // after the results: a query is read as available once g_done reaches its ticket
+         }];
+         [cb commit];
++        OLOG("QueueSubmit committed value %llu", (unsigned long long)v);
+         g_n_submit++;
+         pthread_mutex_unlock(&g_qmu);
+     }
+     dm_gfx_leave();
++    OLOG("QueueSubmit end");
+     return VK_SUCCESS;
+ }
+ VK(vkQueueBindSparse, VkResult, VkQueue q, uint32_t n, const VkBindSparseInfo *bi, VkFence f) {
