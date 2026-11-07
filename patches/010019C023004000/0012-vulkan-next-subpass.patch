@@ -1,0 +1,7 @@
+diff --git a/dm/gfx/vk/hle_vk.m b/dm/gfx/vk/hle_vk.m
+--- a/dm/gfx/vk/hle_vk.m
++++ b/dm/gfx/vk/hle_vk.m
+@@ -1101,2 +1101,3 @@
+ VK(vkCmdEndRenderPass, void, VkCommandBuffer cb) { rec(cb, C_ERP, 0); }
++VK(vkCmdNextSubpass, void, VkCommandBuffer cb, VkSubpassContents sc) { (void)sc; OLOG("CmdNextSubpass cb %p", (void *)cb); }
+ VK(vkCmdBindPipeline, void, VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
