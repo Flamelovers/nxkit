@@ -1,0 +1,33 @@
+--- a/dm/gfx/vk/hle_vk.m
++++ b/dm/gfx/vk/hle_vk.m
+@@ -1035,7 +1035,7 @@
+     OLOG("CreateComputePipelines end %u", n);
+     return VK_SUCCESS;
+ }
+-VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->cpso = nil; p->dss = nil; free(p); } }
++VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { OLOG("DestroyPipeline %p", (void *)p); (void)d; (void)a; if (p) { p->pso = nil; p->cpso = nil; p->dss = nil; free(p); } }
+ 
+ // ---------- Command buffers: recording ----------
+ enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_DISPATCH, C_DISPATCH_INDIRECT };
+@@ -1088,10 +1088,11 @@
+     return VK_SUCCESS;
+ }
+ VK(vkFreeCommandBuffers, void, VkDevice d, VkCommandPool p, uint32_t n, const VkCommandBuffer *cbs) { (void)d; (void)p; for (uint32_t i = 0; i < n; i++) if (cbs[i]) cb_free(cbs[i]); }
+-VK(vkBeginCommandBuffer, VkResult, VkCommandBuffer cb, const VkCommandBufferBeginInfo *bi) { (void)bi; cb->n = 0; return VK_SUCCESS; }
+-VK(vkEndCommandBuffer, VkResult, VkCommandBuffer cb) { (void)cb; return VK_SUCCESS; }
++VK(vkBeginCommandBuffer, VkResult, VkCommandBuffer cb, const VkCommandBufferBeginInfo *bi) { OLOG("BeginCommandBuffer %p", (void *)cb); (void)bi; cb->n = 0; return VK_SUCCESS; }
++VK(vkEndCommandBuffer, VkResult, VkCommandBuffer cb) { OLOG("EndCommandBuffer %p bytes %zu", (void *)cb, cb->n); return VK_SUCCESS; }
+ VK(vkResetCommandBuffer, VkResult, VkCommandBuffer cb, VkCommandBufferResetFlags f) { (void)f; cb->n = 0; return VK_SUCCESS; }
+ VK(vkCmdBeginRenderPass, void, VkCommandBuffer cb, const VkRenderPassBeginInfo *bi, VkSubpassContents sc) {
++    OLOG("CmdBeginRenderPass cb %p renderpass %p framebuffer %p", (void *)cb, (void *)bi->renderPass, (void *)bi->framebuffer);
+     (void)sc; uint32_t nc = umin(bi->clearValueCount, 16);
+     c_brp *c = rec(cb, C_BRP, sizeof *c + nc * sizeof(VkClearValue));
+     c->rp = bi->renderPass; c->fb = bi->framebuffer; c->area = bi->renderArea; c->nclear = nc;
+@@ -1099,6 +1100,7 @@
+ }
+ VK(vkCmdEndRenderPass, void, VkCommandBuffer cb) { rec(cb, C_ERP, 0); }
+ VK(vkCmdBindPipeline, void, VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
++    OLOG("CmdBindPipeline cb %p bindpoint %d pipeline %p", (void *)cb, bp, (void *)p);
+     if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS && bp != VK_PIPELINE_BIND_POINT_COMPUTE) return;
+     *(c_pipe *)rec(cb, C_PIPE, sizeof(c_pipe)) = (c_pipe){p, bp};
+ }
