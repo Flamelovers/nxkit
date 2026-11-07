@@ -1,0 +1,8 @@
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -54,2 +54,4 @@
+ static CGRect fit_16_9(CGRect b) {   // the largest centered 16:9 rectangle in b
++    static int full = -1; if (full < 0) { const char *e = getenv("DM_VK_FILL"); full = e && atoi(e) ? 1 : 0; }
++    if (full) return b;   // DM_VK_FILL: the present stretches or crops to the whole screen
+     CGFloat w = b.size.width, h = b.size.height;
