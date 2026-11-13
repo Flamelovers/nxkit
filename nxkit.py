@@ -352,11 +352,15 @@ def build(repo, kit_dir, out_ipa):
     sh = work / 'shader'
     try:
         if meta['gfx'] == 'vulkan':
-            if (kit / 'godot-smolv').is_dir():
-                decoder = work / 'godot-smolv-decoder'
-                run(['c++', '-std=c++17', '-O2', HERE / 'tools/godot-smolv/smolv.cpp', HERE / 'tools/godot-smolv/decode.cpp', '-o', decoder])
-                run([decoder, kit / 'godot-smolv', kit / 'game/RomFS/godot_spirv'])
-            ios = B.build_vk_shaders(py, repo, [kit / 'game/RomFS'], sh, env, logs, g, reuse=False)
+            if (kit / 'shader-ios').is_dir():   # a kit with an earlier build's iOS shader libraries (only the app changed): no translation this run
+                ios = kit / 'shader-ios'
+                say('reusing the shader libraries in the kit (shader-ios): the game\'s shaders are not translated again')
+            else:
+                if (kit / 'godot-smolv').is_dir():
+                    decoder = work / 'godot-smolv-decoder'
+                    run(['c++', '-std=c++17', '-O2', HERE / 'tools/godot-smolv/smolv.cpp', HERE / 'tools/godot-smolv/decode.cpp', '-o', decoder])
+                    run([decoder, kit / 'godot-smolv', kit / 'game/RomFS/godot_spirv'])
+                ios = B.build_vk_shaders(py, repo, [kit / 'game/RomFS'], sh, env, logs, g, reuse=False)
         else:
             shutil.copytree(kit / 'shader/pkg', sh / 'pkg')
             ios = B.build_shaders(py, repo, sh, xlate, env, logs, g, None, False)
