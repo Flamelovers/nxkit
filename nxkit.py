@@ -352,6 +352,7 @@ def build(repo, kit_dir, out_ipa):
     sh = work / 'shader'
     try:
         if meta['gfx'] == 'vulkan':
+            say(f'kit shader inputs: {sorted(p.name + ("/" if p.is_dir() else "") for p in kit.iterdir())}')
             if (kit / 'shader-ios').is_dir():   # a kit with an earlier build's iOS shader libraries (only the app changed): no translation this run
                 ios = kit / 'shader-ios'
                 say('reusing the shader libraries in the kit (shader-ios): the game\'s shaders are not translated again')
